@@ -1,0 +1,1143 @@
+import time
+import warnings
+from enum import IntFlag
+from functools import partial
+from typing import TYPE_CHECKING, Literal, Self, cast
+
+from qcodes.instrument import (
+    InstrumentBaseKWArgs,
+    InstrumentChannel,
+    VisaInstrument,
+    VisaInstrumentKWArgs,
+)
+from qcodes.parameters import DelegateParameter, ManualParameter
+from qcodes.utils import QCoDeSDeprecationWarning
+from qcodes.validators import (
+    Bool,
+    Enum,
+    Ints,
+    MultiTypeAnd,
+    MultiTypeOr,
+    Numbers,
+    PermissiveMultiples,
+)
+
+if TYPE_CHECKING:
+    from typing import Unpack, assert_never
+
+    from qcodes.parameters import Parameter
+
+ModeType = Literal["CURR", "VOLT"]
+
+
+def _float_round(val: float) -> int:
+    """
+    Rounds a floating number
+
+    Args:
+        val: number to be rounded
+
+    Returns:
+        Rounded integer
+
+    """
+    return round(float(val))
+
+
+class StatusByte(IntFlag):
+    """Status byte.
+
+    Read: Serial polling (RQS), *STB? (MSS).
+    """
+
+    EES = 1 << 1
+    """Extended Event Summary Bit"""
+    EAV = 1 << 2
+    """Error available"""
+    MAV = 1 << 4
+    """Message available"""
+    ESB = 1 << 5
+    """Event Summary Bit"""
+    RQS = 1 << 6
+    """Request Service/Master Status Summary"""
+
+
+class StandardEventRegister(IntFlag):
+    """Standard event register.
+
+    Indicates device status changes. READ: *ESR?
+    """
+
+    OPC = 1 << 0
+    """Operation Complete"""
+    QYE = 1 << 2
+    """Query Error"""
+    DDE = 1 << 3
+    """Device Error"""
+    EXE = 1 << 4
+    """Execution Error"""
+    CME = 1 << 5
+    """Command Error"""
+    PON = 1 << 7
+    """Power on"""
+
+
+class ConditionRegister(IntFlag):
+    """Condition register.
+
+    Current device status. READ: :STATus:CONDition?
+    """
+
+    EOM = 1 << 0
+    """End of Measure"""
+    OVR = 1 << 1
+    """Over Range"""
+    EOT = 1 << 2
+    """End of Trace"""
+    ECF = 1 << 3
+    """End of Create File"""
+    TSE = 1 << 4
+    """Trigger Sampling Error"""
+    RFP = 1 << 8
+    """Ready for Program"""
+    LLO = 1 << 10
+    """Low Limiting"""
+    LHI = 1 << 11
+    """High Limiting"""
+    EMR = 1 << 13
+    """Emergency"""
+
+
+class ExtendedEventRegister(IntFlag):
+    """Extended event register.
+
+    Indicates device status changes. READ: :STATus:EVENt?
+    """
+
+    EOM = 1 << 0
+    """End of Measure"""
+    OVR = 1 << 1
+    """Over Range"""
+    EOT = 1 << 2
+    """End of Trace"""
+    ECF = 1 << 3
+    """End of Create File"""
+    TSE = 1 << 4
+    """Trigger Sampling Error"""
+    SCG = 1 << 5
+    """Source Change"""
+    EOS = 1 << 6
+    """End of Program Step"""
+    EOP = 1 << 7
+    """End of Program"""
+    RFP = 1 << 8
+    """Ready for Program"""
+    LLO = 1 << 10
+    """Low Limiting"""
+    LHI = 1 << 11
+    """High Limiting"""
+    TRP = 1 << 12
+    """Tripped"""
+    EMR = 1 << 13
+    """Emergency"""
+
+
+class YokogawaGS200Exception(Exception):
+    pass
+
+
+class YokogawaGS200Monitor(InstrumentChannel["YokogawaGS200"]):
+    """
+    Monitor part of the GS200. This is only enabled if it is
+    installed in the GS200 (it is an optional extra).
+
+    The units will be automatically updated as required.
+
+    To measure:
+    `GS200.measure.measure()`
+
+    Args:
+        parent (GS200)
+        name: instrument name
+        present
+
+    """
+
+    def __init__(
+        self,
+        parent: "YokogawaGS200",
+        name: str,
+        present: bool,
+        **kwargs: "Unpack[InstrumentBaseKWArgs]",
+    ) -> None:
+        super().__init__(parent, name, **kwargs)
+
+        self.present = present
+
+        # Start off with all disabled
+        self._enabled = False
+        self._output = False
+
+        # Set up mode cache. These will be filled in once the parent
+        # is fully initialized.
+        self._range: float | None = None
+        self._unit: str | None = None
+
+        # Set up monitoring parameters
+        if present:
+            self.enabled: Parameter = self.add_parameter(
+                "enabled",
+                label="Measurement Enabled",
+                get_cmd=self.state,
+                set_cmd=lambda x: self.on() if x else self.off(),
+                val_mapping={
+                    "off": 0,
+                    "on": 1,
+                },
+            )
+            """Parameter enabled"""
+
+            # Note: Measurement will only run if source and
+            # measurement is enabled.
+            self.measure: Parameter = self.add_parameter(
+                "measure",
+                label="<unset>",
+                unit="V/I",
+                get_cmd=self._get_measurement,
+                snapshot_get=False,
+            )
+            """Parameter measure"""
+
+            self.NPLC: Parameter = self.add_parameter(
+                "NPLC",
+                label="NPLC",
+                unit="1/LineFreq",
+                vals=Ints(1, 25),
+                set_cmd=":SENS:NPLC {}",
+                set_parser=int,
+                get_cmd=":SENS:NPLC?",
+                get_parser=_float_round,
+            )
+            """Parameter NPLC"""
+            self.delay: Parameter = self.add_parameter(
+                "delay",
+                label="Measurement Delay",
+                unit="ms",
+                vals=Ints(0, 999999),
+                set_cmd=":SENS:DEL {}",
+                set_parser=int,
+                get_cmd=":SENS:DEL?",
+                get_parser=_float_round,
+            )
+            """Parameter delay"""
+            self.trigger: Parameter = self.add_parameter(
+                "trigger",
+                label="Trigger Source",
+                set_cmd=":SENS:TRIG {}",
+                get_cmd=":SENS:TRIG?",
+                val_mapping={
+                    "READY": "READ",
+                    "READ": "READ",
+                    "TIMER": "TIM",
+                    "TIM": "TIM",
+                    "COMMUNICATE": "COMM",
+                    "IMMEDIATE": "IMM",
+                    "IMM": "IMM",
+                },
+            )
+            """Parameter trigger"""
+            self.interval: Parameter = self.add_parameter(
+                "interval",
+                label="Measurement Interval",
+                unit="s",
+                vals=Numbers(0.1, 3600),
+                set_cmd=":SENS:INT {}",
+                set_parser=float,
+                get_cmd=":SENS:INT?",
+                get_parser=float,
+            )
+            """Parameter interval"""
+
+    def off(self) -> None:
+        """Turn measurement off"""
+        self.write(":SENS 0")
+        self._enabled = False
+
+    def on(self) -> None:
+        """Turn measurement on"""
+        self.write(":SENS 1")
+        self._enabled = True
+
+    def state(self) -> int:
+        """Check measurement state"""
+        state = int(self.ask(":SENS?"))
+        self._enabled = bool(state)
+        return state
+
+    def _get_measurement(self) -> float:
+        if self._unit is None or self._range is None:
+            raise YokogawaGS200Exception("Measurement module not initialized.")
+        if self.parent.auto_range.get() or (self._unit == "VOLT" and self._range < 1):
+            # Measurements will not work with autorange, or when
+            # range is <1V.
+            self._enabled = False
+            raise YokogawaGS200Exception(
+                "Measurements will not work when range is <1V"
+                "or when in auto range mode."
+            )
+        if not self._output:
+            raise YokogawaGS200Exception("Output is off.")
+        if not self._enabled:
+            raise YokogawaGS200Exception("Measurements are disabled.")
+        # If enabled and output is on, then we can perform a measurement.
+        return float(self.ask(":MEAS?"))
+
+    def update_measurement_enabled(
+        self, unit: ModeType, output_range: float | None
+    ) -> None:
+        """
+        Args:
+            unit: Unit to update either VOLT or CURR.
+            output_range: new range.
+
+        """
+        # Recheck measurement state next time we do a measurement
+        self._enabled = False
+
+        # Update units
+        self._range = output_range
+        self._unit = unit
+        if self._unit == "VOLT":
+            self.measure.label = "Source Current"
+            self.measure.unit = "I"
+        else:
+            self.measure.label = "Source Voltage"
+            self.measure.unit = "V"
+
+
+class YokogawaGS200Program(InstrumentChannel["YokogawaGS200"]):
+    """
+    InstrumentModule that holds a Program for the YokoGawa GS200.
+
+    monitor_present indicates if the */MON* option is available,
+    in which case the trigger parameter is as well.
+
+    """
+
+    def __init__(
+        self,
+        parent: "YokogawaGS200",
+        name: str,
+        monitor_present: bool,
+        **kwargs: "Unpack[InstrumentBaseKWArgs]",
+    ) -> None:
+        super().__init__(parent, name, **kwargs)
+        self._repeat = 1
+        self._file_name = None
+
+        # What the manual does not mention: the internal clock is an astonishing 10 Hz,
+        # so only multiples of 0.1 s are allowed.
+        self.interval: Parameter = self.add_parameter(
+            "interval",
+            label="the program interval time",
+            unit="s",
+            vals=MultiTypeAnd(Numbers(0.1, 3600.0), PermissiveMultiples(0.1)),
+            get_cmd=":PROG:INT?",
+            set_cmd=":PROG:INT {}",
+            get_parser=float,
+            set_parser=float,
+        )
+        """Parameter interval"""
+
+        self.slope: Parameter = self.add_parameter(
+            "slope",
+            label="the program slope time",
+            unit="s",
+            vals=MultiTypeAnd(Numbers(0.0, 3600.0), PermissiveMultiples(0.1)),
+            get_cmd=":PROG:SLOP?",
+            set_cmd=":PROG:SLOP {}",
+            get_parser=float,
+            set_parser=float,
+        )
+        """Parameter slope"""
+
+        if monitor_present:
+            self.trigger: Parameter = self.add_parameter(
+                "trigger",
+                label="the program trigger",
+                get_cmd=":PROG:TRIG?",
+                set_cmd=":PROG:TRIG {}",
+                vals=Enum("normal", "mend"),
+            )
+            """Parameter trigger"""
+
+        self.save: Parameter = self.add_parameter(
+            "save",
+            set_cmd=":PROG:SAVE '{}'",
+            docstring="save the program to the system memory (.csv file)",
+        )
+        """save the program to the system memory (.csv file)"""
+
+        self.load: Parameter = self.add_parameter(
+            "load",
+            get_cmd=":PROG:LOAD?",
+            set_cmd=":PROG:LOAD '{}'",
+            docstring="load the program (.csv file) from the system memory",
+        )
+        """load the program (.csv file) from the system memory"""
+
+        self.repeat: Parameter = self.add_parameter(
+            "repeat",
+            label="program execution repetition",
+            get_cmd=":PROG:REP?",
+            set_cmd=":PROG:REP {}",
+            val_mapping={"OFF": 0, "ON": 1},
+        )
+        """Parameter repeat"""
+        self.count: Parameter = self.add_parameter(
+            "count",
+            label="step of the current program",
+            get_cmd=":PROG:COUN?",
+            set_cmd=":PROG:COUN {}",
+            get_parser=int,
+            vals=MultiTypeOr(Ints(1, 10000), Enum("MIN", "MAX")),
+        )
+        """Parameter count"""
+
+        self.add_function(
+            "start", call_cmd=":PROG:EDIT:STAR", docstring="start program editing"
+        )
+        self.add_function(
+            "end", call_cmd=":PROG:EDIT:END", docstring="end program editing"
+        )
+        self.add_function(
+            "run",
+            call_cmd=":PROG:RUN",
+            docstring="run the program",
+        )
+
+    def hold(self) -> None:
+        """Pauses and resumes the program currently being executed."""
+        self.write(":PROG:HOLD")
+
+    def pause(self) -> None:
+        """Pauses the program currently being executed."""
+        self.write(":PROG:PAUS")
+
+    def cont(self) -> None:
+        """Resumes the program currently being executed."""
+        self.write(":PROG:CONT")
+
+
+class YokogawaGS200(VisaInstrument):
+    """
+    QCoDeS driver for the Yokogawa GS200 voltage and current source.
+
+    Args:
+      name: What this instrument is called locally.
+      address: The GPIB or USB address of this instrument
+      kwargs: kwargs to be passed to VisaInstrument class
+
+    """
+
+    default_terminator = "\n"
+
+    def __init__(
+        self,
+        name: str,
+        address: str,
+        **kwargs: "Unpack[VisaInstrumentKWArgs]",
+    ) -> None:
+        super().__init__(name, address, **kwargs)
+
+        self.output: Parameter = self.add_parameter(
+            "output",
+            label="Output State",
+            get_cmd=self.state,
+            set_cmd=lambda x: self.on() if x else self.off(),
+            val_mapping={
+                "off": 0,
+                "on": 1,
+            },
+        )
+        """Parameter output"""
+
+        self.source_mode: Parameter[Literal["VOLT", "CURR"], YokogawaGS200] = (
+            self.add_parameter(
+                "source_mode",
+                label="Source Mode",
+                get_cmd=":SOUR:FUNC?",
+                set_cmd=self._set_source_mode,
+                vals=Enum("VOLT", "CURR"),
+            )
+        )
+        """Parameter source_mode"""
+
+        # We need to get the source_mode value here as we cannot rely on the
+        # default value that may have been changed before we connect to the
+        # instrument (in a previous session or via the frontpanel).
+        self.source_mode()
+
+        self.voltage_range: Parameter = self.add_parameter(
+            "voltage_range",
+            label="Voltage Source Range",
+            unit="V",
+            get_cmd=partial(self._get_range, "VOLT"),
+            set_cmd=partial(self._set_range, "VOLT"),
+            vals=Enum(10e-3, 100e-3, 1e0, 10e0, 30e0),
+            snapshot_exclude=self.source_mode() == "CURR",
+        )
+        """Parameter voltage_range"""
+
+        self.current_range: Parameter = self.add_parameter(
+            "current_range",
+            label="Current Source Range",
+            unit="I",
+            get_cmd=partial(self._get_range, "CURR"),
+            set_cmd=partial(self._set_range, "CURR"),
+            vals=Enum(1e-3, 10e-3, 100e-3, 200e-3),
+            snapshot_exclude=self.source_mode() == "VOLT",
+        )
+        """Parameter current_range"""
+
+        self.range: DelegateParameter = self.add_parameter(
+            "range", parameter_class=DelegateParameter, source=None
+        )
+        """Parameter range"""
+
+        # The instrument does not support auto range. The parameter
+        # auto_range is introduced to add this capability with
+        # setting the initial state at False mode.
+        self.auto_range: Parameter = self.add_parameter(
+            "auto_range",
+            label="Auto Range",
+            set_cmd=self._set_auto_range,
+            get_cmd=None,
+            initial_cache_value=False,
+            vals=Bool(),
+        )
+        """Parameter auto_range"""
+
+        self.voltage: Parameter = self.add_parameter(
+            "voltage",
+            label="Voltage",
+            unit="V",
+            set_cmd=partial(self._get_set_output, "VOLT"),
+            get_cmd=partial(self._get_set_output, "VOLT"),
+            snapshot_exclude=self.source_mode() == "CURR",
+        )
+        """Parameter voltage"""
+
+        self.current: Parameter = self.add_parameter(
+            "current",
+            label="Current",
+            unit="I",
+            set_cmd=partial(self._get_set_output, "CURR"),
+            get_cmd=partial(self._get_set_output, "CURR"),
+            snapshot_exclude=self.source_mode() == "VOLT",
+        )
+        """Parameter current"""
+
+        self.output_level: DelegateParameter = self.add_parameter(
+            "output_level", parameter_class=DelegateParameter, source=None
+        )
+        """Parameter output_level"""
+
+        # We need to pass the source parameter for delegate parameters
+        # (range and output_level) here according to the present
+        # source_mode.
+        match mode := self.source_mode():
+            case "VOLT":
+                self.range.source = self.voltage_range
+                self.output_level.source = self.voltage
+            case "CURR":
+                self.range.source = self.current_range
+                self.output_level.source = self.current
+            case _:
+                if TYPE_CHECKING:
+                    assert_never(mode)
+                raise ValueError(
+                    f"Invalid mode {mode}. Mode must be one of 'CURR' or 'VOLT'"
+                )
+
+        self.voltage_limit: Parameter = self.add_parameter(
+            "voltage_limit",
+            label="Voltage Protection Limit",
+            unit="V",
+            vals=Ints(1, 30),
+            get_cmd=":SOUR:PROT:VOLT?",
+            set_cmd=":SOUR:PROT:VOLT {}",
+            get_parser=_float_round,
+            set_parser=int,
+        )
+        """Parameter voltage_limit"""
+
+        self.current_limit: Parameter[float, Self] = self.add_parameter(
+            "current_limit",
+            label="Current Protection Limit",
+            unit="I",
+            vals=Numbers(1e-3, 200e-3),
+            get_cmd=":SOUR:PROT:CURR?",
+            set_cmd=":SOUR:PROT:CURR {:.3f}",
+            get_parser=float,
+            set_parser=float,
+        )
+        """Parameter current_limit"""
+
+        self.four_wire: Parameter = self.add_parameter(
+            "four_wire",
+            label="Four Wire Sensing",
+            get_cmd=":SENS:REM?",
+            set_cmd=":SENS:REM {}",
+            val_mapping={
+                "off": 0,
+                "on": 1,
+            },
+        )
+        """Parameter four_wire"""
+
+        # Note: The guard feature can be used to remove common mode noise.
+        # Read the manual to see if you would like to use it
+        self.guard: Parameter = self.add_parameter(
+            "guard",
+            label="Guard Terminal",
+            get_cmd=":SENS:GUAR?",
+            set_cmd=":SENS:GUAR {}",
+            val_mapping={"off": 0, "on": 1},
+        )
+        """Parameter guard"""
+
+        # Return measured line frequency
+        self.line_freq: Parameter = self.add_parameter(
+            "line_freq",
+            label="Line Frequency",
+            unit="Hz",
+            get_cmd="SYST:LFR?",
+            get_parser=int,
+        )
+        """Parameter line_freq"""
+
+        # Check if monitor is present, and if so enable measurement
+        monitor_present = "/MON" in self.ask("*OPT?")
+        self.measure: YokogawaGS200Monitor = self.add_submodule(
+            "measure", YokogawaGS200Monitor(self, "measure", monitor_present)
+        )
+        """Instrument module measure"""
+
+        # Reset function
+        self.add_function("reset", call_cmd="*RST")
+
+        self.program: YokogawaGS200Program = self.add_submodule(
+            "program", YokogawaGS200Program(self, "program", monitor_present)
+        )
+        """Instrument module program"""
+
+        self.BNC_out: Parameter = self.add_parameter(
+            "BNC_out",
+            label="BNC trigger out",
+            get_cmd=":ROUT:BNCO?",
+            set_cmd=":ROUT:BNCO {}",
+            vals=Enum("trigger", "output", "ready"),
+            docstring="Sets or queries the output BNC signal",
+        )
+        """Sets or queries the output BNC signal"""
+
+        self.BNC_in: Parameter = self.add_parameter(
+            "BNC_in",
+            label="BNC trigger in",
+            get_cmd=":ROUT:BNCI?",
+            set_cmd=":ROUT:BNCI {}",
+            vals=Enum("trigger", "output"),
+            docstring="Sets or queries the input BNC signal",
+        )
+        """Sets or queries the input BNC signal"""
+
+        self.system_errors: Parameter = self.add_parameter(
+            "system_errors",
+            get_cmd=":SYSTem:ERRor?",
+            docstring="returns the oldest unread error message from the event "
+            "log and removes it from the log.",
+        )
+        """returns the oldest unread error message from the event log and removes it from the log."""
+
+        self.status_byte: Parameter = self.add_parameter(
+            "status_byte",
+            get_cmd="*STB?",
+            get_parser=lambda x: StatusByte(int(x)),
+            label="Status Byte",
+        )
+        """Query the instrument status byte."""
+
+        self.standard_event_register: Parameter = self.add_parameter(
+            "standard_event_register",
+            get_cmd="*ESR?",
+            get_parser=lambda x: StandardEventRegister(int(x)),
+            label="Standard Event Register",
+        )
+        """Query the instrument standard event register."""
+
+        self.extended_event_register: Parameter = self.add_parameter(
+            "extended_event_register",
+            get_cmd=":STAT:EVEN?",
+            get_parser=lambda x: ExtendedEventRegister(int(x)),
+            label="Extended Event Register",
+        )
+        """Query the instrument extended event register."""
+
+        self.condition_register: Parameter = self.add_parameter(
+            "condition_register",
+            get_cmd=":STAT:COND?",
+            get_parser=lambda x: ConditionRegister(int(x)),
+            label="Condition Register",
+        )
+        """Query the instrument condition register."""
+
+        self.ramp_mode: ManualParameter = self.add_parameter(
+            "ramp_mode",
+            ManualParameter,
+            label="Ramp Mode",
+            vals=Enum("JUMP", "HARDWARE", "SOFTWARE"),
+            initial_value="JUMP",
+        )
+        """Set whether :attr:`current`/:attr:`voltage` jump to the given
+        value or ramp at speed :attr:`ramp_rate`.
+
+         - ``"JUMP"`` corresponds to no ramp (instantaneous jump to the
+           new output level).
+         - ``"HARDWARE"`` corresponds to a program with a single step.
+         - ``"SOFTWARE"`` corresponds to a ramp implemented using the
+           parameter attributes :attr:`Parameter.step` and
+           :attr:`Parameter.inter_delay`.
+
+        """
+
+        self.ramp_blocking: ManualParameter = self.add_parameter(
+            "ramp_blocking",
+            ManualParameter,
+            label="Ramp Blocking",
+            vals=Bool(),
+            initial_value=True,
+        )
+        """Set whether ramps are blocking or not."""
+
+        self.ramp_rate: ManualParameter = self.add_parameter(
+            "ramp_rate",
+            ManualParameter,
+            label="Ramp Rate",
+            unit="V/s",
+            vals=Numbers(1e-3 / 3600, float("inf")),
+            initial_value=10e-3 if self.source_mode() == "VOLT" else 100e-6,
+        )
+        """The ramp rate when :attr:`ramp_mode` is not ``"JUMP"``."""
+
+        self.ramp_step: ManualParameter = self.add_parameter(
+            "ramp_step",
+            ManualParameter,
+            label="Ramp step",
+            unit="V",
+            vals=Numbers(0, float("inf")),
+            initial_value=0,
+        )
+        """The ramp step when :attr:`ramp_mode` is set to ``"SOFTWARE"``.
+
+        When :attr:`ramp_mode` is ``"HARDWARE"``, defines the output delta
+        above which a ramp is used. If the delta is below this value,
+        the output is "jumped".
+        """
+
+        self.connect_message()
+
+    def on(self) -> None:
+        """Turn output on"""
+        self.write("OUTPUT 1")
+        self.measure._output = True
+
+    def off(self) -> None:
+        """Turn output off"""
+        self.write("OUTPUT 0")
+        self.measure._output = False
+
+    def state(self) -> int:
+        """Check state"""
+        state = int(self.ask("OUTPUT?"))
+        self.measure._output = bool(state)
+        return state
+
+    def _parse_delay(self, delay: float | None, step: float) -> float:
+        if delay is not None and delay != 0:
+            warnings.warn(
+                "The delay parameter is deprecated and will be removed in a future release. "
+                "Please use the ramp_rate and ramp_step parameters instead.",
+                QCoDeSDeprecationWarning,
+                stacklevel=3,
+            )
+            rate = step / delay
+        else:
+            rate = self.ramp_rate()
+        return rate
+
+    def _parse_step(self, step: float | None) -> float:
+        if step is not None:
+            warnings.warn(
+                "The step parameter is deprecated and will be removed in a future release. "
+                "Please use the ramp_step parameter instead.",
+                QCoDeSDeprecationWarning,
+                stacklevel=3,
+            )
+            return float(step)
+        else:
+            return self.ramp_step()
+
+    def ramp_voltage(
+        self,
+        ramp_to: float,
+        step: float | None = None,
+        delay: float | None = None,
+        ramp_mode: Literal["HARDWARE", "SOFTWARE"] = "HARDWARE",
+    ) -> None:
+        """
+        Ramp the voltage from the current level to the specified output.
+
+        Args:
+            ramp_to: The ramp target in Volt
+            step: The ramp steps in Volt. Deprecated.
+            delay: The time between finishing one step and
+                starting another in seconds. Deprecated.
+            ramp_mode: Use hardware or software ramps. See :attr:`ramp_mode`.
+
+        """
+        step = self._parse_step(step)
+        rate = self._parse_delay(delay, step)
+
+        self._assert_mode("VOLT")
+        with (
+            self.ramp_step.set_to(step),
+            self.ramp_rate.set_to(rate),
+            self.ramp_mode.set_to(ramp_mode),
+            self.ramp_blocking.set_to(True),
+        ):
+            self._ramp_source(ramp_to)
+
+    def ramp_current(
+        self,
+        ramp_to: float,
+        step: float | None = None,
+        delay: float | None = None,
+        ramp_mode: Literal["HARDWARE", "SOFTWARE"] = "HARDWARE",
+    ) -> None:
+        """
+        Ramp the current from the current level to the specified output.
+
+        Args:
+            ramp_to: The ramp target in Ampere
+            step: The ramp steps in Volt. Deprecated.
+            delay: The time between finishing one step and
+                starting another in seconds. Deprecated.
+            ramp_mode: Use hardware or software ramps. See :attr:`ramp_mode`.
+
+        """
+        step = self._parse_step(step)
+        rate = self._parse_delay(delay, step)
+
+        self._assert_mode("CURR")
+        with (
+            self.ramp_step.set_to(step),
+            self.ramp_rate.set_to(rate),
+            self.ramp_mode.set_to(ramp_mode),
+            self.ramp_blocking.set_to(True),
+        ):
+            self._ramp_source(ramp_to)
+
+    def _ramp_source(self, ramp_to: float) -> None:
+        """
+        Ramp the output from the current level to the specified output
+
+        Args:
+            ramp_to: The ramp target in volts/amps
+
+        """
+        match self.ramp_mode():
+            case "HARDWARE":
+                if self.output() == "off":
+                    raise RuntimeError(
+                        "Need to enable output before hardware ramps are allowed."
+                    )
+
+                if abs(ramp_to) > (rng := self.range()):
+                    raise ValueError(
+                        f"Desired output level not in range  [-{rng:.3}, {rng:.3}]"
+                    )
+
+                if (
+                    delta := ramp_to
+                    - cast("Parameter", self.output_level.source).get_raw()
+                ) == 0:
+                    # Nothing to do. We got the raw value because ramp_to already went through
+                    # set-parsing including scaling and offsetting.
+                    return
+                elif abs(delta) < self.ramp_step():
+                    self._set_output(ramp_to)
+                    return
+
+                slope_time = abs(delta) / self.ramp_rate()
+
+                # Clip to hardware limits
+                if slope_time > 3600:
+                    self.log.info("Slope time > 3600s. Clipping.")
+                slope_time = min(slope_time, 3600)
+
+                if slope_time < 0.1:
+                    self.log.info("Interval time < 0.1s. Clipping.")
+                interval_time = max(slope_time, 0.1)
+
+                # Program the ramp; don't use the Program class to avoid overhead from
+                # repeated communication
+                self.write(
+                    ";".join(
+                        [
+                            "*CLS",
+                            ":PROG:REP 0",
+                            f":PROG:SLOP {slope_time:E}",
+                            f":PROG:INT {interval_time:E}",
+                            ":PROG:EDIT:STAR",
+                            f":SOUR:LEV {ramp_to:E}",
+                            ":PROG:EDIT:END",
+                            ":PROG:RUN",
+                        ]
+                    )
+                )
+
+                if not self.ramp_blocking():
+                    return
+
+                while ExtendedEventRegister.EOP not in self.extended_event_register():
+                    # EOP indicates the end of a program
+                    if StatusByte.EAV in self.status_byte() and (
+                        errors := self.system_errors()
+                    ):
+                        raise RuntimeError(f"Ramp failed with errors: {errors}")
+
+                    # Sleep between 2 and 100 ms before checking again.
+                    time.sleep(max(min(slope_time / 10, 100e-3), 2e-3))
+            case "SOFTWARE":
+                saved_step = self.output_level.step
+                saved_inter_delay = self.output_level.inter_delay
+
+                try:
+                    self.output_level.step = self.ramp_step()
+                    self.output_level.inter_delay = self.ramp_step() / self.ramp_rate()
+                    with self.ramp_mode.set_to("JUMP"):
+                        self.output_level(ramp_to)
+                finally:
+                    self.output_level.step = saved_step
+                    self.output_level.inter_delay = saved_inter_delay
+            case "JUMP":
+                self._set_output(ramp_to)
+            case _:
+                raise ValueError(f"Unknown ramp mode: {self.ramp_mode()}")
+
+    def _get_set_output(
+        self, mode: ModeType, output_level: float | None = None
+    ) -> float | None:
+        """
+        Get or set the output level.
+
+        Args:
+            mode: "CURR" or "VOLT"
+            output_level: If missing, we assume that we are getting the
+                current level. Else we are setting it
+
+        """
+        self._assert_mode(mode)
+        if output_level is not None:
+            self._ramp_source(output_level)
+            return None
+        return float(self.ask(":SOUR:LEV?"))
+
+    def _set_output(self, output_level: float) -> None:
+        """
+        Set the output of the instrument.
+
+        Args:
+            output_level: output level in Volt or Ampere, depending
+                on the current mode.
+
+        """
+        auto_enabled = self.auto_range()
+
+        if not auto_enabled:
+            self_range = self.range()
+            if self_range is None:
+                raise RuntimeError(
+                    "Trying to set output but not in auto mode and range is unknown."
+                )
+        else:
+            mode = self.source_mode.cache.get(get_if_invalid=True)
+            match mode:
+                case "CURR":
+                    self_range = 200e-3
+                case "VOLT":
+                    self_range = 30.0
+                case _:
+                    if TYPE_CHECKING:
+                        assert_never(mode)
+                    raise ValueError(
+                        f"Invalid mode {mode}. Mode must be one of 'CURR' or 'VOLT'"
+                    )
+
+        # Check we are not trying to set an out of range value
+        if self.range() is None or abs(output_level) > abs(self_range):
+            # Check that the range hasn't changed
+            if not auto_enabled:
+                self_range = self.range.get_latest()
+                if self_range is None:
+                    raise RuntimeError(
+                        "Trying to set output but not in"
+                        " auto mode and range is unknown."
+                    )
+            # If we are still out of range, raise a value error
+            if abs(output_level) > abs(self_range):
+                raise ValueError(
+                    "Desired output level not in range"
+                    f" [-{self_range:.3}, {self_range:.3}]"
+                )
+
+        if auto_enabled:
+            auto_str = ":AUTO"
+        else:
+            auto_str = ""
+        cmd_str = f":SOUR:LEV{auto_str} {output_level:.5e}"
+        self.write(cmd_str)
+
+    def _update_measurement_module(
+        self,
+        source_mode: ModeType | None = None,
+        source_range: float | None = None,
+    ) -> None:
+        """
+        Update validators/units as source mode/range changes.
+
+        Args:
+            source_mode: "CURR" or "VOLT"
+            source_range: New range.
+
+        """
+        if not self.measure.present:
+            return
+
+        if source_mode is None:
+            # since the parameter is not generic in the data type this cannot
+            # narrow None to ModeType even if that is the only valid values
+            # for source_mode.
+            source_mode = self.source_mode.get_latest()
+        # Get source range if auto-range is off
+        if source_range is None and not self.auto_range():
+            source_range = self.range()
+
+        self.measure.update_measurement_enabled(source_mode, source_range)
+
+    def _set_auto_range(self, val: bool) -> None:
+        """
+        Enable/disable auto range.
+
+        Args:
+            val: auto range on or off
+
+        """
+        self._auto_range = val
+        # Disable measurement if auto range is on
+        if self.measure.present:
+            # Disable the measurement module if auto range is enabled,
+            # because the measurement does not work in the
+            # 10mV/100mV ranges.
+            self.measure._enabled &= not val
+
+    def _assert_mode(self, mode: ModeType) -> None:
+        """
+        Assert that we are in the correct mode to perform an operation.
+
+        Args:
+            mode: "CURR" or "VOLT"
+
+        """
+        if self.source_mode.get_latest() != mode:
+            raise ValueError(
+                f"Cannot get/set {mode} settings while in {self.source_mode.get_latest()} mode"
+            )
+
+    def _set_source_mode(self, mode: ModeType) -> None:
+        """
+        Set output mode and change delegate parameters' source accordingly.
+        Also, exclude/include the parameters from snapshot depending on the
+        mode. The instrument does not support 'current', 'current_range'
+        parameters in "VOLT" mode and 'voltage', 'voltage_range' parameters
+        in "CURR" mode.
+
+        Args:
+            mode: "CURR" or "VOLT"
+
+        """
+        if self.output() == "on":
+            raise YokogawaGS200Exception("Cannot switch mode while source is on")
+
+        if mode == "VOLT":
+            self.range.source = self.voltage_range
+            self.output_level.source = self.voltage
+            self.voltage_range.snapshot_exclude = False
+            self.voltage.snapshot_exclude = False
+            self.current_range.snapshot_exclude = True
+            self.current.snapshot_exclude = True
+            self.ramp_rate.unit = "V/s"
+            self.ramp_step.unit = "V"
+        else:
+            self.range.source = self.current_range
+            self.output_level.source = self.current
+            self.voltage_range.snapshot_exclude = True
+            self.voltage.snapshot_exclude = True
+            self.current_range.snapshot_exclude = False
+            self.current.snapshot_exclude = False
+            self.ramp_rate.unit = "A/s"
+            self.ramp_step.unit = "A"
+
+        self.write(f"SOUR:FUNC {mode}")
+        # We set the cache here since `_update_measurement_module`
+        # needs the current value which would otherwise only be set
+        # after this method exits
+        self.source_mode.cache.set(mode)
+        # Update the measurement mode
+        self._update_measurement_module(source_mode=mode)
+
+    def _set_range(self, mode: ModeType, output_range: float) -> None:
+        """
+        Update range
+
+        Args:
+            mode: "CURR" or "VOLT"
+            output_range: Range to set. For voltage, we have the ranges [10e-3,
+                100e-3, 1e0, 10e0, 30e0]. For current, we have the ranges [1e-3,
+                10e-3, 100e-3, 200e-3]. If auto_range = False, then setting the
+                output can only happen if the set value is smaller than the
+                present range.
+
+        """
+        self._assert_mode(mode)
+        output_range = float(output_range)
+        self._update_measurement_module(source_mode=mode, source_range=output_range)
+        self.write(f":SOUR:RANG {output_range}")
+
+    def _get_range(self, mode: ModeType) -> float:
+        """
+        Query the present range.
+
+        Args:
+            mode: "CURR" or "VOLT"
+
+        Returns:
+            range: For voltage, we have the ranges [10e-3, 100e-3, 1e0, 10e0,
+                30e0]. For current, we have the ranges [1e-3, 10e-3, 100e-3,
+                200e-3]. If auto_range = False, then setting the output can only
+                happen if the set value is smaller than the present range.
+
+        """
+        self._assert_mode(mode)
+        return float(self.ask(":SOUR:RANG?"))

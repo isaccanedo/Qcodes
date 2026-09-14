@@ -1,0 +1,28 @@
+spec: "1.0"
+devices:
+  cryomag_tm620:
+    eom:
+      GPIB INSTR:
+        q: "\r\n"
+        r: "\r\n"
+    error: ERROR
+    dialogues:
+      - q: "*IDN?"
+        r: "Cryomagnetics,TM-620_simulation,2002,2.00"
+
+    properties:
+      shield:
+        default: "55.5 K"
+        getter:
+          q: "MEAS? A"
+          r: "{}"
+      magnet:
+        default: "4.12 k"
+        getter:
+          q: "MEAS? B"
+          r: "{}"
+
+
+resources:
+  GPIB0::1::INSTR:
+    device: cryomag_tm620

@@ -1,0 +1,492 @@
+from collections.abc import Callable, Iterable
+from typing import Any
+
+import hypothesis.strategies as hst
+import numpy as np
+import pytest
+from hypothesis import event, given, settings
+
+from qcodes.parameters import Parameter
+from qcodes.parameters.parameter_base import (
+    _offset_raw_value,
+    _scale_raw_value,
+    _unoffset_value,
+    _unscale_value,
+)
+
+
+def test_scale_raw_value() -> None:
+    p = Parameter(name="test_scale_raw_value", set_cmd=None)
+    p(42)
+    assert p.raw_value == 42
+
+    p.scale = 2
+    assert p.raw_value == 42  # No set/get cmd performed
+    assert p() == 21
+
+    p(10)
+    assert p.raw_value == 20
+    assert p() == 10
+
+
+# There are a number different scenarios for testing a parameter with scale
+# and offset. Therefore a custom strategy for generating test parameters
+# is implemented here. The possible cases are:
+# for getting and setting a parameter: values can be
+#    scalar:
+#        offset and scale can be scalars
+# for getting only:
+#    array:
+#        offset and scale can be scalars or arrays(of same legnth as values)
+#        independently
+
+# define shorthands for strategies
+TestFloats = hst.floats(min_value=-1e40, max_value=1e40).filter(
+    lambda x: abs(x) >= 1e-20
+)
+SharedSize = hst.shared(hst.integers(min_value=1, max_value=100), key="shared_size")
+ValuesScalar = hst.shared(hst.booleans(), key="values_scalar")
+
+
+# the following test stra
+@hst.composite
+def iterable_or_number(draw, values, size, values_scalar, is_values):
+    if draw(values_scalar):
+        # if parameter values are scalar,
+        # return scalar for values and scale/offset
+        return draw(values)
+    elif is_values:
+        # if parameter values are not scalar and parameter values are requested
+        # return a list of values of the given size
+        return draw(hst.lists(values, min_size=draw(size), max_size=draw(size)))
+    # if parameter values are not scalar and scale/offset are requested
+    # make a random choice whether to return a list of the same size as
+    # the values or a simple scalar
+    elif draw(hst.booleans()):
+        return draw(hst.lists(values, min_size=draw(size), max_size=draw(size)))
+    else:
+        return draw(values)
+
+
+@settings(max_examples=500)  # default:100 increased
+@given(
+    values=iterable_or_number(TestFloats, SharedSize, ValuesScalar, True),
+    offsets=iterable_or_number(TestFloats, SharedSize, ValuesScalar, False),
+    scales=iterable_or_number(TestFloats, SharedSize, ValuesScalar, False),
+)
+def test_scale_and_offset_raw_value_iterable(values, offsets, scales) -> None:
+    p = Parameter(name="test_scale_and_offset_raw_value", set_cmd=None)
+
+    # test that scale and offset does not change the default behaviour
+    p(values)
+    assert p.raw_value == values
+
+    # test setting scale and offset does not change anything
+    p.scale = scales
+    p.offset = offsets
+    assert p.raw_value == values
+
+    np_values = np.array(values)
+    np_offsets = np.array(offsets)
+    np_scales = np.array(scales)
+    np_get_values = np.array(p())
+    # No set/get cmd performed
+    np.testing.assert_allclose(np_get_values, (np_values - np_offsets) / np_scales)
+
+    # test set, only for scalar values
+    if not isinstance(values, Iterable):
+        p(values)
+        # No set/get cmd performed
+        np.testing.assert_allclose(
+            np.array(p.raw_value), np_values * np_scales + np_offsets
+        )
+
+        # Due to possible lack of accuracy of the floating-point operations
+        # back-and-forth testing is done only for values of ``offsets`` that are
+        # not too different from ``values*scales``
+        tolerance = 1e7
+        if (
+            abs(values * scales) >= abs(offsets)
+            and abs(values * scales) < tolerance * abs(offsets)
+        ) or (
+            abs(values * scales) < abs(offsets)
+            and abs(offsets) < tolerance * abs(values * scales)
+        ):
+            # testing conversion back and forth
+            p(values)
+            np_get_values = np.array(p())
+            # No set/get cmd performed
+            np.testing.assert_allclose(np_get_values, np_values)
+
+    # adding statistics
+    if isinstance(offsets, Iterable):
+        event("Offset is array")
+    if isinstance(scales, Iterable):
+        event("Scale is array")
+    if isinstance(values, Iterable):
+        event("Value is array")
+    if isinstance(scales, Iterable) and isinstance(offsets, Iterable):
+        event("Scale is array and also offset")
+    if isinstance(scales, Iterable) and not isinstance(offsets, Iterable):
+        event("Scale is array but not offset")
+
+
+@settings(max_examples=300)
+@given(
+    values=iterable_or_number(TestFloats, SharedSize, ValuesScalar, True),
+    offsets=iterable_or_number(TestFloats, SharedSize, ValuesScalar, False),
+    scales=iterable_or_number(TestFloats, SharedSize, ValuesScalar, False),
+)
+def test_scale_and_offset_raw_value_iterable_for_set_cache(
+    values, offsets, scales
+) -> None:
+    p = Parameter(name="test_scale_and_offset_raw_value", set_cmd=None)
+
+    # test that scale and offset does not change the default behaviour
+    p.cache.set(values)
+    assert p.raw_value == values
+
+    # test setting scale and offset does not change anything
+    p.scale = scales
+    p.offset = offsets
+    assert p.raw_value == values
+
+    np_values = np.array(values)
+    np_offsets = np.array(offsets)
+    np_scales = np.array(scales)
+    np_get_latest_values = np.array(p.get_latest())
+    # Without a call to ``get``, ``get_latest`` will just return old
+    # cached values without applying the set scale and offset
+    np.testing.assert_allclose(np_get_latest_values, np_values)
+    np_get_values = np.array(p.get())
+    # Now that ``get`` is called, the returned values are the result of
+    # application of the scale and offset. Obviously, calling
+    # ``get_latest`` now will also return the values with the applied
+    # scale and offset
+    np.testing.assert_allclose(np_get_values, (np_values - np_offsets) / np_scales)
+    np_get_latest_values_after_get = np.array(p.get_latest())
+    np.testing.assert_allclose(
+        np_get_latest_values_after_get, (np_values - np_offsets) / np_scales
+    )
+
+    # test ``cache.set`` for scalar values
+    if not isinstance(values, Iterable):
+        p.cache.set(values)
+        np.testing.assert_allclose(
+            np.array(p.raw_value), np_values * np_scales + np_offsets
+        )
+        # No set/get cmd performed
+
+        # testing conversion back and forth
+        p.cache.set(values)
+        np_get_latest_values = np.array(p.get_latest())
+        # No set/get cmd performed
+        np.testing.assert_allclose(np_get_latest_values, np_values)
+
+    # adding statistics
+    if isinstance(offsets, Iterable):
+        event("Offset is array")
+    if isinstance(scales, Iterable):
+        event("Scale is array")
+    if isinstance(values, Iterable):
+        event("Value is array")
+    if isinstance(scales, Iterable) and isinstance(offsets, Iterable):
+        event("Scale is array and also offset")
+    if isinstance(scales, Iterable) and not isinstance(offsets, Iterable):
+        event("Scale is array but not offset")
+
+
+def test_numpy_array_valued_parameter_preserves_type_if_scale_and_offset_are_set() -> (
+    None
+):
+    def rands():
+        return np.random.default_rng().standard_normal(5)
+
+    param = Parameter(name="test_param", set_cmd=None, get_cmd=rands)
+
+    param.scale = 10
+    param.offset = 7
+
+    values = param()
+
+    assert isinstance(values, np.ndarray)
+
+
+def test_setting_numpy_array_valued_param_if_scale_and_offset_are_not_none() -> None:
+    param = Parameter(name="test_param", set_cmd=None, get_cmd=None)
+
+    values = np.array([1, 2, 3, 4, 5])
+
+    param.scale = 100
+    param.offset = 10
+
+    param(values)
+
+    assert isinstance(param.raw_value, np.ndarray)
+
+
+def test_set_with_iterable_scale_and_offset() -> None:
+    """Setting a sequence with per element scale and offset."""
+    param = Parameter(name="test_param", set_cmd=None, get_cmd=None)
+    param.scale = [2, 4]
+    param.offset = [1, 2]
+
+    param([10, 20])
+
+    # scale is applied first, offset second
+    assert param.raw_value == (21, 82)
+    # and reversed on the way back out
+    assert param.get() == (10, 20)
+
+
+def test_set_with_iterable_scale_and_scalar_offset() -> None:
+    param = Parameter(name="test_param", set_cmd=None, get_cmd=None)
+    param.scale = [2, 4]
+    param.offset = np.array([1, 1])
+
+    param(np.array([10, 20]))
+
+    np.testing.assert_allclose(np.array(param.raw_value), [21, 81])
+    np.testing.assert_allclose(np.array(param.get()), [10, 20])
+
+
+def test_set_numpy_array_with_scalar_scale_and_offset() -> None:
+    param = Parameter(name="test_param", set_cmd=None, get_cmd=None)
+    param.scale = 2
+    param.offset = 1
+
+    param(np.array([10, 20]))
+
+    np.testing.assert_allclose(param.raw_value, [21, 41])
+    np.testing.assert_allclose(param.get(), [10, 20])
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+def test_set_sequence_with_scalar_scale_and_offset(container: type) -> None:
+    """A list or tuple must be scaled element wise, not repeated."""
+    param = Parameter(name="test_param", set_cmd=None, get_cmd=None)
+    param.scale = 2
+    param.offset = 1
+
+    param(container([10, 20]))
+
+    assert param.raw_value == (21, 41)
+    assert param.get() == (10, 20)
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+def test_set_sequence_with_scalar_scale_only(container: type) -> None:
+    param = Parameter(name="test_param", set_cmd=None, get_cmd=None)
+    param.scale = 2
+
+    param(container([10, 20]))
+
+    assert param.raw_value == (20, 40)
+    assert param.get() == (10, 20)
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+def test_set_sequence_with_scalar_offset_only(container: type) -> None:
+    param = Parameter(name="test_param", set_cmd=None, get_cmd=None)
+    param.offset = 1
+
+    param(container([10, 20]))
+
+    assert param.raw_value == (11, 21)
+    assert param.get() == (10, 20)
+
+
+def test_set_sequence_with_scalar_scale_and_iterable_offset() -> None:
+    param = Parameter(name="test_param", set_cmd=None, get_cmd=None)
+    param.scale = 2
+    param.offset = [1, 2]
+
+    param([10, 20])
+
+    assert param.raw_value == (21, 42)
+    assert param.get() == (10, 20)
+
+
+def test_set_sequence_with_iterable_scale_and_scalar_offset() -> None:
+    param = Parameter(name="test_param", set_cmd=None, get_cmd=None)
+    param.scale = [2, 4]
+    param.offset = 1
+
+    param([10, 20])
+
+    assert param.raw_value == (21, 81)
+    assert param.get() == (10, 20)
+
+
+def test_get_sequence_with_scalar_scale_and_offset() -> None:
+    """A list valued raw value falls back on element wise arithmetic."""
+    param = Parameter(name="test_param", set_cmd=None, get_cmd=lambda: [10, 20])
+    param.scale = 2
+    param.offset = 4
+
+    assert param.get() == (3.0, 8.0)
+
+
+def test_get_sequence_with_iterable_scale_and_offset() -> None:
+    param = Parameter(name="test_param", set_cmd=None, get_cmd=lambda: [10, 20])
+    param.scale = [2, 4]
+    param.offset = [4, 8]
+
+    assert param.get() == (3.0, 3.0)
+
+
+@pytest.mark.parametrize("attribute", ["scale", "offset"])
+def test_get_raises_for_non_numeric_value(attribute: str) -> None:
+    """A non iterable value that cannot be scaled/offset re-raises TypeError."""
+    sentinel = object()
+    param: Parameter = Parameter(
+        name="test_param", set_cmd=None, get_cmd=lambda: sentinel
+    )
+    setattr(param, attribute, 2)
+
+    with pytest.raises(TypeError):
+        param.get()
+
+
+def test_scale_raw_value_helper() -> None:
+    assert _scale_raw_value(10, 2) == 20
+    assert _scale_raw_value([10, 20], [2, 4]) == (20, 80)
+    assert _scale_raw_value([10, 20], 2) == (20, 40)
+    assert _scale_raw_value((10, 20), 2) == (20, 40)
+    # any sequence, not just list and tuple
+    assert _scale_raw_value(range(10, 30, 10), 2) == (20, 40)
+    np.testing.assert_allclose(_scale_raw_value(np.array([10, 20]), 2), [20, 40])
+
+
+def test_offset_raw_value_helper() -> None:
+    assert _offset_raw_value(10, 2) == 12
+    assert _offset_raw_value([10, 20], [2, 4]) == (12, 24)
+    assert _offset_raw_value([10, 20], 2) == (12, 22)
+    assert _offset_raw_value((10, 20), 2) == (12, 22)
+    # any sequence, not just list and tuple
+    assert _offset_raw_value(range(10, 30, 10), 2) == (12, 22)
+    np.testing.assert_allclose(_offset_raw_value(np.array([10, 20]), 2), [12, 22])
+
+
+def test_unoffset_value_helper() -> None:
+    assert _unoffset_value(10, 2) == 8
+    assert _unoffset_value([10, 20], [2, 4]) == (8, 16)
+    assert _unoffset_value([10, 20], 2) == (8, 18)
+    np.testing.assert_allclose(_unoffset_value(np.array([10, 20]), 2), [8, 18])
+
+    with pytest.raises(TypeError):
+        _unoffset_value(object(), 2)
+
+
+def test_unscale_value_helper() -> None:
+    assert _unscale_value(10, 2) == 5
+    assert _unscale_value([10, 20], [2, 4]) == (5, 5)
+    assert _unscale_value([10, 20], 2) == (5, 10)
+    np.testing.assert_allclose(_unscale_value(np.array([10, 20]), 2), [5, 10])
+
+    with pytest.raises(TypeError):
+        _unscale_value(object(), 2)
+
+
+@pytest.mark.parametrize(
+    "helper", [_scale_raw_value, _offset_raw_value, _unoffset_value, _unscale_value]
+)
+def test_helpers_do_not_mutate_their_input(
+    helper: Callable[[Any, Any], Any],
+) -> None:
+    """The helpers must not mutate the value they are handed."""
+    value = [10.0, 20.0]
+    helper(value, [2.0, 4.0])
+    assert value == [10.0, 20.0]
+
+
+@pytest.mark.parametrize("attribute", ["scale", "offset"])
+def test_set_raises_on_length_mismatch(attribute: str) -> None:
+    """A scale/offset that does not match the length of the value is an error."""
+    param = Parameter(name="test_param", set_cmd=None, get_cmd=None)
+    setattr(param, attribute, [2, 4])
+
+    with pytest.raises(
+        ValueError,
+        match=f"Cannot apply {attribute} of length 2 to a value of length 3",
+    ):
+        param([10, 20, 30])
+
+
+@pytest.mark.parametrize("attribute", ["scale", "offset"])
+def test_set_raises_on_length_mismatch_for_numpy_value(attribute: str) -> None:
+    param = Parameter(name="test_param", set_cmd=None, get_cmd=None)
+    setattr(param, attribute, [2, 4])
+
+    with pytest.raises(
+        ValueError,
+        match=f"Cannot apply {attribute} of length 2 to a value of length 3",
+    ):
+        param(np.array([10, 20, 30]))
+
+
+@pytest.mark.parametrize("attribute", ["scale", "offset"])
+def test_get_raises_on_length_mismatch(attribute: str) -> None:
+    param = Parameter(name="test_param", set_cmd=None, get_cmd=lambda: [10, 20, 30])
+    setattr(param, attribute, [2, 4])
+
+    with pytest.raises(
+        ValueError,
+        match=f"Cannot apply {attribute} of length 2 to a value of length 3",
+    ):
+        param.get()
+
+
+@pytest.mark.parametrize("attribute", ["scale", "offset"])
+def test_get_raises_on_length_mismatch_for_numpy_value(attribute: str) -> None:
+    """Numpy raises its own error before the element wise fallback is reached."""
+    param = Parameter(
+        name="test_param", set_cmd=None, get_cmd=lambda: np.array([10.0, 20.0, 30.0])
+    )
+    setattr(param, attribute, [2, 4])
+
+    with pytest.raises(ValueError, match="could not be broadcast together"):
+        param.get()
+
+
+@pytest.mark.parametrize(
+    ("helper", "kind"),
+    [
+        (_scale_raw_value, "scale"),
+        (_offset_raw_value, "offset"),
+        (_unoffset_value, "offset"),
+        (_unscale_value, "scale"),
+    ],
+)
+def test_helpers_raise_on_length_mismatch(
+    helper: Callable[[Any, Any], Any], kind: str
+) -> None:
+    with pytest.raises(
+        ValueError, match=f"Cannot apply {kind} of length 2 to a value of length 3"
+    ):
+        helper([10, 20, 30], [2, 4])
+
+    with pytest.raises(
+        ValueError, match=f"Cannot apply {kind} of length 3 to a value of length 2"
+    ):
+        helper([10, 20], [2, 4, 6])
+
+
+@pytest.mark.parametrize(
+    ("helper", "kind"),
+    [
+        (_scale_raw_value, "scale"),
+        (_offset_raw_value, "offset"),
+        (_unoffset_value, "offset"),
+        (_unscale_value, "scale"),
+    ],
+)
+def test_helpers_report_unknown_length_for_iterators(
+    helper: Callable[[Any, Any], Any], kind: str
+) -> None:
+    """An iterable that has no length is reported as unknown."""
+    with pytest.raises(
+        ValueError,
+        match=f"Cannot apply {kind} of length unknown to a value of length 3",
+    ):
+        helper([10, 20, 30], iter([2, 4]))

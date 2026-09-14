@@ -1,0 +1,8 @@
+include src/qcodes/monitor/dist/*
+include src/qcodes/monitor/dist/js/*
+include src/qcodes/monitor/dist/css/*
+include src/qcodes/configuration/*.json
+include src/qcodes/instrument/sims/*.yaml
+include src/qcodes/py.typed
+include src/qcodes/dist/schemas/*
+include src/qcodes/dist/tests/station/*

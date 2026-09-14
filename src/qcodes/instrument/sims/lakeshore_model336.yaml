@@ -1,0 +1,443 @@
+spec: "1.0"
+devices:
+  device 1:
+    eom:
+      GPIB INSTR:
+        q: "\r\n"
+        r: "\r\n"
+    error: ERROR
+    dialogues:
+      - q: "*IDN?"
+        r: "QCoDeS, m0d3l, 336, 0.0.01"
+
+    properties:
+      temperature_A:
+        default: 100.0
+        getter:
+          q: "KRDG? A"
+          r: "{}"
+
+      sensor_raw_A:
+        default: 101.0
+        getter:
+          q: "SRDG? A"
+          r: "{}"
+
+      sensor_status_A:
+        default: 0
+        getter:
+          q: "RDGST? A"
+          r: "{}"
+
+      sensor_name_A:
+        default: "my name is boring"
+        getter:
+          q: "INNAME? A"
+          r: "{}"
+        setter:
+          q: "INNAME A,\"{}\""
+
+      sensor_tlimit_A:
+        default: 0
+        getter:
+          q: "TLIMIT? A"
+          r: "{}"
+        setter:
+          q: "TLIMIT A,{}"
+
+      sensor_intype_A:
+        default: "0,0,1,0,1"
+        getter:
+          q: "INTYPE? A"
+          r: "{}"
+        setter:
+          q: "INTYPE A,{}"
+
+      sensor_curve_number_A:
+        default: 42
+        getter:
+          q: "INCRV? A"
+          r: "{}"
+
+      curve_data_query_for_curve_42:
+        getter:
+          q: "CRVHDR? 42"
+          r: "DT-042,01110042,2,342.0,1"
+
+
+      temperature_B:
+        default: 100.0
+        getter:
+          q: "KRDG? B"
+          r: "{}"
+
+      sensor_raw_B:
+        default: 101.0
+        getter:
+          q: "SRDG? B"
+          r: "{}"
+
+      sensor_status_B:
+        default: 0
+        getter:
+          q: "RDGST? B"
+          r: "{}"
+
+      sensor_name_B:
+        default: "my name is boring"
+        getter:
+          q: "INNAME? B"
+          r: "{}"
+        setter:
+          q: "INNAME B,\"{}\""
+
+      sensor_tlimit_B:
+        default: 0
+        getter:
+          q: "TLIMIT? B"
+          r: "{}"
+        setter:
+          q: "TLIMIT B,{}"
+
+      sensor_intype_B:
+        default: "0,0,1,0,1"
+        getter:
+          q: "INTYPE? B"
+          r: "{}"
+        setter:
+          q: "INTYPE B,{}"
+
+      sensor_curve_number_B:
+        default: 41
+        getter:
+          q: "INCRV? B"
+          r: "{}"
+
+      curve_data_query_for_curve_41:
+        getter:
+          q: "CRVHDR? 41"
+          r: "DT-041,01110041,2,341.0,1"
+
+      temperature_C:
+        default: 100.0
+        getter:
+          q: "KRDG? C"
+          r: "{}"
+
+      sensor_raw_C:
+        default: 101.0
+        getter:
+          q: "SRDG? C"
+          r: "{}"
+
+      sensor_status_C:
+        default: 0
+        getter:
+          q: "RDGST? C"
+          r: "{}"
+
+      sensor_name_C:
+        default: "my name is boring"
+        getter:
+          q: "INNAME? C"
+          r: "{}"
+        setter:
+          q: "INNAME C,\"{}\""
+
+      sensor_tlimit_C:
+        default: 0
+        getter:
+          q: "TLIMIT? C"
+          r: "{}"
+        setter:
+          q: "TLIMIT C,{}"
+
+      sensor_intype_C:
+        default: "0,0,1,0,1"
+        getter:
+          q: "INTYPE? C"
+          r: "{}"
+        setter:
+          q: "INTYPE C,{}"
+
+      sensor_curve_number_C:
+        default: 40
+        getter:
+          q: "INCRV? C"
+          r: "{}"
+
+      curve_data_query_for_curve_40:
+        getter:
+          q: "CRVHDR? 40"
+          r: "DT-040,01110040,2,340.0,1"
+
+      temperature_D:
+        default: 100.0
+        getter:
+          q: "KRDG? D"
+          r: "{}"
+
+      sensor_raw_D:
+        default: 101.0
+        getter:
+          q: "SRDG? D"
+          r: "{}"
+
+      sensor_status_D:
+        default: 0
+        getter:
+          q: "RDGST? D"
+          r: "{}"
+
+      sensor_name_D:
+        default: "my name is boring"
+        getter:
+          q: "INNAME? D"
+          r: "{}"
+        setter:
+          q: "INNAME D,\"{}\""
+
+      sensor_tlimit_D:
+        default: 0
+        getter:
+          q: "TLIMIT? D"
+          r: "{}"
+        setter:
+          q: "TLIMIT D,{}"
+
+      sensor_intype_D:
+        default: "0,0,1,0,1"
+        getter:
+          q: "INTYPE? D"
+          r: "{}"
+        setter:
+          q: "INTYPE D,{}"
+
+      sensor_curve_number_D:
+        default: 39
+        getter:
+          q: "INCRV? D"
+          r: "{}"
+
+      curve_data_query_for_curve_39:
+        getter:
+          q: "CRVHDR? 39"
+          r: "DT-039,01110039,2,339.0,1"
+
+      pid_output_1:
+        default: "10,20,30"
+        getter:
+          q: "PID? 1"
+          r: "{}"
+        setter:
+          q: "PID 1,{}"
+
+      pid_output_2:
+        default: "10,20,30"
+        getter:
+          q: "PID? 2"
+          r: "{}"
+        setter:
+          q: "PID 2,{}"
+
+      outmode_output_1:
+        default: "1,2,0"
+        getter:
+          q: "OUTMODE? 1"
+          r: "{}"
+        setter:
+          q: "OUTMODE 1, {}"
+
+      outmode_output_2:
+        default: "1,1,0"
+        getter:
+          q: "OUTMODE? 2"
+          r: "{}"
+        setter:
+          q: "OUTMODE 2, {}"
+
+      range_output_1:
+        default: 1
+        getter:
+          q: "RANGE? 1"
+          r: "{}"
+        setter:
+          q: "RANGE 1,{}"
+
+      range_output_2:
+        default: 1
+        getter:
+          q: "RANGE? 2"
+          r: "{}"
+        setter:
+          q: "RANGE 2,{}"
+
+      setpoint_output_1:
+        default: 0
+        getter:
+          q: "SETP? 1"
+          r: "{}"
+        setter:
+          q: "SETP 1,{}"
+
+      setpoint_output_2:
+        default: 0
+        getter:
+          q: "SETP? 2"
+          r: "{}"
+        setter:
+          q: "SETP 2,{}"
+
+      htr_output_1:
+        default: 0.005
+        getter:
+          q: "HTR? 1"
+          r: "{}"
+
+      htr_output_2:
+        default: 0.005
+        getter:
+          q: "HTR? 2"
+          r: "{}"
+
+      htrset_output_1:
+        default: "1, 5"
+        getter:
+          q: "HTRSET? 1"
+          r: "{}"
+        setter:
+          q: "HTRSET 1, {}"
+
+      htrset_output_2:
+        default: "1, 5"
+        getter:
+          q: "HTRSET? 2"
+          r: "{}"
+        setter:
+          q: "HTRSET 2, {}"
+
+      ramp_output_1:
+        default: "0,0"
+        getter:
+          q: "RAMP? 1"
+          r: "{}"
+        setter:
+          q: "RAMP 1,{}"
+
+      ramp_output_2:
+        default: "0,0"
+        getter:
+          q: "RAMP? 2"
+          r: "{}"
+        setter:
+          q: "RAMP 2,{}"
+
+      rampst_output_1:
+        default: 0
+        getter:
+          q: "RAMPST? 1"
+          r: "{}"
+
+      rampst_output_2:
+        default: 0
+        getter:
+          q: "RAMPST? 2"
+          r: "{}"
+
+      # ====================
+      # Output 3 (Voltage Source, no PID)
+      # ====================
+      outmode_output_3:
+        default: "1,1,0"
+        getter:
+          q: "OUTMODE? 3"
+          r: "{}"
+        setter:
+          q: "OUTMODE 3, {}"
+
+      range_output_3:
+        default: 1
+        getter:
+          q: "RANGE? 3"
+          r: "{}"
+        setter:
+          q: "RANGE 3,{}"
+
+      setpoint_output_3:
+        default: 0
+        getter:
+          q: "SETP? 3"
+          r: "{}"
+        setter:
+          q: "SETP 3,{}"
+
+      htr_output_3:
+        default: 0
+        getter:
+          q: "HTR? 3"
+          r: "{}"
+
+      ramp_output_3:
+        default: "0,0"
+        getter:
+          q: "RAMP? 3"
+          r: "{}"
+        setter:
+          q: "RAMP 3,{}"
+
+      rampst_output_3:
+        default: 0
+        getter:
+          q: "RAMPST? 3"
+          r: "{}"
+
+      # ====================
+      # Output 4 (Voltage Source, no PID)
+      # ====================
+      outmode_output_4:
+        default: "1,2,0"
+        getter:
+          q: "OUTMODE? 4"
+          r: "{}"
+        setter:
+          q: "OUTMODE 4, {}"
+
+      range_output_4:
+        default: 1
+        getter:
+          q: "RANGE? 4"
+          r: "{}"
+        setter:
+          q: "RANGE 4,{}"
+
+      setpoint_output_4:
+        default: 0
+        getter:
+          q: "SETP? 4"
+          r: "{}"
+        setter:
+          q: "SETP 4,{}"
+
+      htr_output_4:
+        default: 0
+        getter:
+          q: "HTR? 4"
+          r: "{}"
+
+      ramp_output_4:
+        default: "0,0"
+        getter:
+          q: "RAMP? 4"
+          r: "{}"
+        setter:
+          q: "RAMP 4,{}"
+
+      rampst_output_4:
+        default: 0
+        getter:
+          q: "RAMPST? 4"
+          r: "{}"
+
+resources:
+  GPIB::2::INSTR:
+    device: device 1
