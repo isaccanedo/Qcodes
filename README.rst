@@ -121,3 +121,4 @@ See `License <https://github.com/QCoDeS/Qcodes/tree/main/LICENSE>`__.
    :target: https://zenodo.org/badge/latestdoi/37137879
 .. |OpenSSF| image:: https://api.securityscorecards.dev/projects/github.com/microsoft/Qcodes/badge
    :target: https://securityscorecards.dev/viewer/?uri=github.com/microsoft/Qcodes
+-----------------------------------------------------------------------------------------------------
