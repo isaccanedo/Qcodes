@@ -122,3 +122,4 @@ See `License <https://github.com/QCoDeS/Qcodes/tree/main/LICENSE>`__.
 .. |OpenSSF| image:: https://api.securityscorecards.dev/projects/github.com/microsoft/Qcodes/badge
    :target: https://securityscorecards.dev/viewer/?uri=github.com/microsoft/Qcodes
 -----------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------
